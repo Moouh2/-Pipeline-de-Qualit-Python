@@ -1,0 +1,349 @@
+name: CD - Déploiement Continu
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:  # Permet le déclenchement manuel
+    inputs:
+      environment:
+        description: 'Environnement de déploiement'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+      version:
+        description: 'Version à déployer'
+        required: false
+        default: 'latest'
+
+env:
+  PYTHON_VERSION: "3.10"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Job 1: Préparation du déploiement
+  prepare-deployment:
+    name: 🚀 Préparation Déploiement
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.determine-env.outputs.environment }}
+      version: ${{ steps.determine-version.outputs.version }}
+      should-deploy: ${{ steps.determine-env.outputs.should-deploy }}
+    
+    steps:
+    - name: 🎯 Détermination de l'environnement
+      id: determine-env
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          echo "should-deploy=true" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "environment=staging" >> $GITHUB_OUTPUT
+          echo "should-deploy=true" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+          echo "environment=production" >> $GITHUB_OUTPUT
+          echo "should-deploy=true" >> $GITHUB_OUTPUT
+        else
+          echo "should-deploy=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: 📋 Détermination de la version
+      id: determine-version
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" =~ ^refs/tags/.* ]]; then
+          echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        else
+          echo "version=latest-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+        fi
+
+  # Job 2: Tests de pré-déploiement
+  pre-deployment-tests:
+    name: 🧪 Tests Pré-déploiement
+    runs-on: ubuntu-latest
+    needs: prepare-deployment
+    if: needs.prepare-deployment.outputs.should-deploy == 'true'
+    
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Configuration Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 📦 Installation des dépendances
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+
+    - name: 🧪 Tests complets
+      run: |
+        python -m pytest tests/ \
+          --cov=src \
+          --cov-fail-under=80 \
+          -v \
+          --tb=short
+
+    - name: 🔒 Vérifications de sécurité
+      run: |
+        bandit -r src/ -ll
+        safety check
+
+    - name: 📦 Test de build
+      run: |
+        python -m build
+        twine check dist/*
+
+  # Job 3: Build et publication Docker (si applicable)
+  build-and-push-docker:
+    name: 🐳 Build Docker
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, pre-deployment-tests]
+    if: needs.prepare-deployment.outputs.should-deploy == 'true'
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🔐 Login au Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 📋 Extraction des métadonnées
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha
+
+    - name: 🔨 Build et Push de l'image Docker
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+
+  # Job 4: Déploiement Staging
+  deploy-staging:
+    name: 🌱 Déploiement Staging
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, pre-deployment-tests]
+    if: |
+      needs.prepare-deployment.outputs.should-deploy == 'true' && 
+      needs.prepare-deployment.outputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.votre-app.com
+    
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🚀 Déploiement vers Staging
+      run: |
+        echo "🌱 Déploiement vers l'environnement staging..."
+        echo "Version: ${{ needs.prepare-deployment.outputs.version }}"
+        
+        # Exemple de déploiement (à adapter selon votre infrastructure)
+        # ./scripts/deploy.sh staging ${{ needs.prepare-deployment.outputs.version }}
+        
+        # Ou déploiement via SSH
+        # ssh user@staging-server "cd /app && ./deploy.sh ${{ needs.prepare-deployment.outputs.version }}"
+        
+        # Ou déploiement Kubernetes
+        # kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare-deployment.outputs.version }}
+
+    - name: 🧪 Tests post-déploiement Staging
+      run: |
+        echo "🧪 Tests post-déploiement staging..."
+        # Tests de santé de l'application
+        # curl -f https://staging.votre-app.com/health
+        # python tests/e2e/test_staging.py
+
+    - name: 📢 Notification Slack Staging
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        text: |
+          🌱 Déploiement Staging: ${{ job.status }}
+          Version: ${{ needs.prepare-deployment.outputs.version }}
+          Commit: ${{ github.sha }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Job 5: Déploiement Production (après validation manuelle)
+  deploy-production:
+    name: 🏭 Déploiement Production
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, pre-deployment-tests, deploy-staging]
+    if: |
+      needs.prepare-deployment.outputs.should-deploy == 'true' && 
+      needs.prepare-deployment.outputs.environment == 'production'
+    environment:
+      name: production
+      url: https://votre-app.com
+    
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🛡️ Vérifications pré-production
+      run: |
+        echo "🛡️ Vérifications supplémentaires pour la production..."
+        # Vérifications spécifiques à la production
+        # - Base de données prête
+        # - Services externes disponibles
+        # - Monitoring en place
+
+    - name: 🚀 Déploiement vers Production
+      run: |
+        echo "🏭 Déploiement vers la production..."
+        echo "Version: ${{ needs.prepare-deployment.outputs.version }}"
+        
+        # Déploiement production avec stratégie blue-green ou canary
+        # ./scripts/deploy.sh production ${{ needs.prepare-deployment.outputs.version }}
+
+    - name: 🧪 Tests post-déploiement Production
+      run: |
+        echo "🧪 Tests post-déploiement production..."
+        sleep 30  # Attente stabilisation
+        # Tests critiques de santé
+        # curl -f https://votre-app.com/health
+        # python tests/e2e/test_production.py
+
+    - name: 📊 Monitoring post-déploiement
+      run: |
+        echo "📊 Activation du monitoring renforcé..."
+        # Activation d'alertes spécifiques post-déploiement
+        # Vérification des métriques clés
+
+    - name: 📢 Notification équipe Production
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#production'
+        text: |
+          🏭 Déploiement Production: ${{ job.status }}
+          Version: ${{ needs.prepare-deployment.outputs.version }}
+          Commit: ${{ github.sha }}
+          URL: https://votre-app.com
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Job 6: Publication sur PyPI (pour les packages)
+  publish-pypi:
+    name: 📦 Publication PyPI
+    runs-on: ubuntu-latest
+    needs: [prepare-deployment, pre-deployment-tests]
+    if: |
+      startsWith(github.ref, 'refs/tags/v') && 
+      needs.prepare-deployment.outputs.should-deploy == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/votre-package
+    
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Configuration Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 📦 Installation des outils de build
+      run: |
+        python -m pip install --upgrade pip build twine
+
+    - name: 🔨 Construction du package
+      run: |
+        python -m build
+
+    - name: 🔍 Vérification du package
+      run: |
+        twine check dist/*
+
+    - name: 📤 Publication sur PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        verbose: true
+
+    - name: 📋 Création GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+        body: |
+          ## 🚀 Release ${{ github.ref }}
+          
+          ### ✨ Nouveautés
+          - Voir CHANGELOG.md pour les détails
+          
+          ### 📦 Installation
+          ```bash
+          pip install votre-package==${{ github.ref }}
+          ```
+          
+          ### 🔗 Liens utiles
+          - [Documentation](https://votre-package.readthedocs.io)
+          - [PyPI](https://pypi.org/project/votre-package)
+
+  # Job 7: Rollback automatique en cas d'échec
+  rollback-on-failure:
+    name: 🔄 Rollback Automatique
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: |
+      always() && 
+      (needs.deploy-staging.result == 'failure' || needs.deploy-production.result == 'failure')
+    
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🔄 Rollback vers version précédente
+      run: |
+        echo "🔄 Rollback automatique en cours..."
+        # Commandes de rollback spécifiques à votre infrastructure
+        # ./scripts/rollback.sh
+
+    - name: 🚨 Notification d'urgence
+      uses: 8398a7/action-slack@v3
+      with:
+        status: 'failure'
+        channel: '#alerts'
+        text: |
+          🚨 ROLLBACK AUTOMATIQUE DÉCLENCHÉ 🚨
+          Raison: Échec du déploiement
+          Commit: ${{ github.sha }}
+          Action requise: Vérification manuelle
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
