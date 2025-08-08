@@ -1,0 +1,43 @@
+[flake8]
+# Longueur maximale des lignes
+max-line-length = 88
+
+# Codes d'erreur à ignorer
+ignore = 
+    # E203: whitespace before ':' (conflit avec black)
+    E203,
+    # W503: line break before binary operator (style obsolète)
+    W503,
+    # E501: line too long (géré par black)
+    E501
+
+# Fichiers et dossiers à exclure
+exclude = 
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    env,
+    build,
+    dist,
+    *.egg-info,
+    .pytest_cache,
+    .mypy_cache,
+    migrations,
+    node_modules
+
+# Complexité cyclomatique maximale
+max-complexity = 10
+
+# Importations par ligne
+per-file-ignores =
+    # Ignorer les importations inutilisées dans __init__.py
+    __init__.py:F401,
+    # Ignorer les importations d'étoiles dans les fichiers de configuration
+    settings.py:F405,F403
+    
+# Activer certains plugins (si installés)
+select = E,W,F,C
+
+# Longueur maximale du nom des variables
+max-name-length = 50
